@@ -438,9 +438,10 @@ defmodule Commanded.ProcessManagers.ProcessManager do
       def start_link(opts \\ []) do
         opts = Keyword.merge(@opts, opts)
 
-        {application, name, config} = ProcessManager.parse_config!(__MODULE__, opts)
+        {application, name, process_router, config} =
+          ProcessManager.parse_config!(__MODULE__, opts)
 
-        ProcessRouter.start_link(application, name, __MODULE__, config)
+        process_router.start_link(application, name, __MODULE__, config)
       end
 
       @doc """
@@ -457,11 +458,12 @@ defmodule Commanded.ProcessManagers.ProcessManager do
       def child_spec(opts) do
         opts = Keyword.merge(@opts, opts)
 
-        {application, name, config} = ProcessManager.parse_config!(__MODULE__, opts)
+        {application, name, process_router, config} =
+          ProcessManager.parse_config!(__MODULE__, opts)
 
         default = %{
           id: {__MODULE__, application, name},
-          start: {ProcessRouter, :start_link, [application, name, __MODULE__, config]},
+          start: {process_router, :start_link, [application, name, __MODULE__, config]},
           restart: :permanent,
           type: :worker
         }
@@ -533,7 +535,8 @@ defmodule Commanded.ProcessManagers.ProcessManager do
     :subscribe_to,
     :subscription_opts,
     :event_timeout,
-    :idle_timeout
+    :idle_timeout,
+    :process_router
   ]
 
   def parse_config!(module, config) do
@@ -559,7 +562,9 @@ defmodule Commanded.ProcessManagers.ProcessManager do
       raise ArgumentError, inspect(module) <> " expects :name option"
     end
 
-    {application, name, config}
+    {process_router, config} = Keyword.pop(config, :process_router, ProcessRouter)
+
+    {application, name, process_router, config}
   end
 
   @doc false
