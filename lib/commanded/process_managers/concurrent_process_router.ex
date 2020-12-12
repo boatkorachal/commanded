@@ -112,6 +112,14 @@ defmodule Commanded.ProcessManagers.ConcurrentProcessRouter do
   end
 
   @impl GenServer
+  def handle_cast({:handle_event, event}, %State{} = state) do
+    case handle_event(event, state) do
+      %State{} = state -> {:noreply, state}
+      reply -> reply
+    end
+  end
+
+  @impl GenServer
   def handle_cast({:ack_event, event, instance}, %State{} = state) do
     %State{pending_acks: pending_acks} = state
     %RecordedEvent{event_number: event_number} = event
@@ -166,9 +174,9 @@ defmodule Commanded.ProcessManagers.ConcurrentProcessRouter do
       |> Enum.reject(&event_already_seen?(&1, state))
       |> Upcast.upcast_event_stream(additional_metadata: %{application: application})
 
-    state =
-      unseen_events
-      |> Enum.reduce(state, &handle_event/2)
+    Enum.each(unseen_events, fn event ->
+      GenServer.cast(self(), {:handle_event, event})
+    end)
 
     {:noreply, state}
   end
