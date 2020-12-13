@@ -31,7 +31,7 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
       :process_event_timer,
       process_managers: %{},
       pending_acks: %{},
-      pending_events: []
+      pending_confirm_receipts: []
     ]
   end
 
@@ -112,6 +112,14 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
   end
 
   @impl GenServer
+  def handle_cast({:handle_event, event}, %State{} = state) do
+    case handle_event(event, state) do
+      %State{} = state -> {:noreply, state}
+      reply -> reply
+    end
+  end
+
+  @impl GenServer
   def handle_cast({:ack_event, event, instance}, %State{} = state) do
     %State{pending_acks: pending_acks} = state
     %RecordedEvent{event_number: event_number} = event
@@ -119,9 +127,6 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
     state =
       case pending_acks |> Map.get(event_number, []) |> List.delete(instance) do
         [] ->
-          # Enqueue a message to continue processing any pending events
-          GenServer.cast(self(), :process_pending_events)
-
           state = %State{state | pending_acks: Map.delete(pending_acks, event_number)}
 
           # no pending acks so confirm receipt of event
@@ -133,31 +138,6 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
       end
 
     {:noreply, state}
-  end
-
-  @impl GenServer
-  def handle_cast(:process_pending_events, %State{pending_events: []} = state),
-    do: {:noreply, state}
-
-  @impl GenServer
-  def handle_cast(:process_pending_events, %State{} = state) do
-    %State{pending_events: [event | pending_events]} = state
-
-    case length(pending_events) do
-      0 ->
-        :ok
-
-      1 ->
-        Logger.debug(fn -> describe(state) <> " has 1 pending event to process" end)
-
-      count ->
-        Logger.debug(fn -> describe(state) <> " has #{count} pending events to process" end)
-    end
-
-    case handle_event(event, state) do
-      %State{} = state -> {:noreply, %State{state | pending_events: pending_events}}
-      reply -> reply
-    end
   end
 
   @doc false
@@ -182,9 +162,9 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
 
   @impl GenServer
   def handle_info({:events, events}, %State{} = state) do
-    %State{application: application, pending_events: pending_events} = state
+    %State{application: application} = state
 
-    Logger.debug(fn -> describe(state) <> " received #{length(events)} event(s)" end)
+    Logger.debug(fn -> describe(state) <> " received #{describe_events(events)}" end)
 
     # Exclude already seen events
     unseen_events =
@@ -192,22 +172,9 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
       |> Enum.reject(&event_already_seen?(&1, state))
       |> Upcast.upcast_event_stream(additional_metadata: %{application: application})
 
-    state =
-      case {pending_events, unseen_events} do
-        {[], []} ->
-          # No pending or unseen events, so state is unmodified
-          state
-
-        {[], _} ->
-          # No pending events, but some unseen events so start processing them
-          GenServer.cast(self(), :process_pending_events)
-
-          %State{state | pending_events: unseen_events}
-
-        {_, _} ->
-          # Already processing pending events, append the unseen events so they are processed afterwards
-          %State{state | pending_events: pending_events ++ unseen_events}
-      end
+    Enum.each(unseen_events, fn event ->
+      GenServer.cast(self(), {:handle_event, event})
+    end)
 
     {:noreply, state}
   end
@@ -432,28 +399,65 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
 
   # Continue processing any pending events and confirm receipt of the given event id
   defp ack_and_continue(%RecordedEvent{} = event, %State{} = state) do
-    GenServer.cast(self(), :process_pending_events)
-
     confirm_receipt(event, state)
   end
 
   # Confirm receipt of given event
-  defp confirm_receipt(%RecordedEvent{event_number: event_number} = event, %State{} = state) do
+  defp confirm_receipt(%RecordedEvent{} = event, %State{} = state) do
     %State{
       application: application,
       consistency: consistency,
       process_manager_name: name,
-      subscription: subscription
+      subscription: subscription,
+      pending_acks: pending_acks,
+      pending_confirm_receipts: pending_confirm_receipts
     } = state
 
     Logger.debug(fn ->
-      describe(state) <> " confirming receipt of event: #{inspect(event_number)}"
+      describe(state) <> " confirming receipt of event: #{inspect(event.event_number)}"
     end)
 
-    :ok = Subscription.ack_event(subscription, event)
-    :ok = Subscriptions.ack_event(application, name, consistency, event)
+    pending_confirm_receipts = Enum.sort_by([event | pending_confirm_receipts], & &1.event_number)
 
-    %State{state | last_seen_event: event_number}
+    min_pending_ack_event_number = pending_acks |> Map.keys() |> Enum.min(fn -> nil end)
+
+    {confirm_receipts, pending_confirm_receipts} =
+      case min_pending_ack_event_number do
+        nil ->
+          {pending_confirm_receipts, []}
+
+        min_pending_ack_event_number ->
+          pending_confirm_receipts
+          |> Enum.split_while(&(&1.event_number < min_pending_ack_event_number))
+      end
+
+    if Enum.count(confirm_receipts) > 0 do
+      Logger.debug(fn ->
+        describe(state) <>
+          " confirmings #{describe_events(confirm_receipts)} pendings #{
+            describe_events(pending_confirm_receipts)
+          }"
+      end)
+
+      last_confirm_receipt = List.last(confirm_receipts)
+      :ok = Subscription.ack_event(subscription, last_confirm_receipt)
+
+      :ok =
+        confirm_receipts
+        |> Enum.each(&Subscriptions.ack_event(application, name, consistency, &1))
+
+      %State{
+        state
+        | pending_confirm_receipts: pending_confirm_receipts,
+          last_seen_event: last_confirm_receipt.event_number
+      }
+    else
+      Logger.debug(fn ->
+        describe(state) <> " pendings #{describe_events(pending_confirm_receipts)}"
+      end)
+
+      %State{state | pending_confirm_receipts: pending_confirm_receipts}
+    end
   end
 
   defp start_or_continue_process_manager(process_uuid, %State{} = state) do
@@ -580,5 +584,13 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
     } = event
 
     "#{inspect(event_number)} (#{inspect(stream_id)}@#{inspect(stream_version)})"
+  end
+
+  defp describe([%RecordedEvent{} = event | events]) do
+    describe(event) <> "\n" <> describe(events)
+  end
+
+  defp describe_events(events) do
+    "#{Enum.count(events)} events (#{events |> Enum.map(& &1.event_number) |> Enum.join(",")})"
   end
 end
