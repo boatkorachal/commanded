@@ -111,7 +111,7 @@ defmodule Commanded.ProcessManagers.ProcessManagerInstance do
   @doc false
   @impl GenServer
   def handle_call(:stop, _from, %State{} = state) do
-    :ok = delete_state(state)
+    # :ok = delete_state(state)
 
     # Stop the process with a normal reason
     {:stop, :normal, :ok, state}
