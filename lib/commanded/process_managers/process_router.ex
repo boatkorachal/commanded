@@ -417,7 +417,8 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
       describe(state) <> " confirming receipt of event: #{inspect(event.event_number)}"
     end)
 
-    pending_confirm_receipts = Enum.sort_by([event | pending_confirm_receipts], & &1.event_number)
+    # always sorted by event_number
+    pending_confirm_receipts = insert_to_sorted_events(pending_confirm_receipts, event)
 
     min_pending_ack_event_number = pending_acks |> Map.keys() |> Enum.min(fn -> nil end)
 
@@ -571,6 +572,18 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
       Process.send_after(self(), {:event_timeout, event_number}, event_timeout)
 
     %State{state | process_event_timer: process_event_timer}
+  end
+
+  def insert_to_sorted_events([], %RecordedEvent{} = event) do
+    [event]
+  end
+
+  def insert_to_sorted_events([%RecordedEvent{} = first | rest], %RecordedEvent{} = event) do
+    if event.event_number <= first.event_number do
+      [event, first | rest]
+    else
+      [first | insert_to_sorted_events(rest, event)]
+    end
   end
 
   defp describe(%State{process_manager_module: process_manager_module}),
