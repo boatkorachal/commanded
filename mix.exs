@@ -155,7 +155,8 @@ defmodule Commanded.Mixfile do
         ],
         "Process Managers": [
           Commanded.ProcessManagers.FailureContext,
-          Commanded.ProcessManagers.ProcessManager
+          Commanded.ProcessManagers.ProcessManager,
+          Commanded.SimpleProcessManagers.ProcessManager
         ],
         "Event Store": [
           Commanded.EventStore,
@@ -204,6 +205,7 @@ defmodule Commanded.Mixfile do
         Commanded.Commands,
         Commanded.Event,
         Commanded.ProcessManagers,
+        Commanded.SimpleProcessManagers,
         Commanded.EventStore,
         Commanded.PubSub,
         Commanded.Registration,
